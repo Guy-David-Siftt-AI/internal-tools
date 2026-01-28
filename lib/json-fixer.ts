@@ -127,18 +127,16 @@ function recursivelyParseStrings(value: unknown, depth: number = 0): unknown {
     }
 
     // Check if we have a prefix pattern (text followed by : before the brace)
+    // e.g., "extractor_request: {'key': 'value'}" -> just parse the dict part
     if (startIndex > 0 && trimmed.endsWith(endChar)) {
       const beforeBrace = trimmed.slice(0, startIndex).trim();
       // Check if the prefix ends with a colon (common pattern like "key: {...}")
       if (beforeBrace.endsWith(":")) {
-        const prefix = beforeBrace.slice(0, -1).trim();
         const jsonPart = trimmed.slice(startIndex);
         const parsed = tryParseWithJsonRepair(jsonPart);
         if (parsed !== null) {
-          return {
-            _prefix: prefix,
-            _data: recursivelyParseStrings(parsed, depth + 1),
-          };
+          // Return just the parsed data, discarding the prefix
+          return recursivelyParseStrings(parsed, depth + 1);
         }
       }
     }
