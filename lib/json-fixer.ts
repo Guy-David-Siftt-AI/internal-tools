@@ -64,7 +64,15 @@ export function fixJson(input: string): JsonFixResult {
 
   // Try parsing the fixed JSON
   try {
-    const data = JSON.parse(processed);
+    let data = JSON.parse(processed);
+
+    // Recursively parse any string values that look like JSON/Python dicts
+    const beforeRecursive = JSON.stringify(data);
+    data = recursivelyParseStrings(data);
+    if (JSON.stringify(data) !== beforeRecursive) {
+      fixes.push("Recursively parsed nested JSON/Python strings");
+    }
+
     return {
       success: true,
       data,
@@ -83,6 +91,55 @@ export function fixJson(input: string): JsonFixResult {
       fixes,
     };
   }
+}
+
+/**
+ * Recursively walk through an object/array and parse any string values
+ * that look like JSON or Python dicts
+ */
+function recursivelyParseStrings(value: unknown, depth: number = 0): unknown {
+  // Prevent infinite recursion
+  if (depth > 10) return value;
+
+  if (Array.isArray(value)) {
+    return value.map((item) => recursivelyParseStrings(item, depth + 1));
+  }
+
+  if (value !== null && typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value)) {
+      result[key] = recursivelyParseStrings(val, depth + 1);
+    }
+    return result;
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    // Check if it looks like a JSON object or array, or Python dict/list
+    if (
+      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+      (trimmed.startsWith("[") && trimmed.endsWith("]"))
+    ) {
+      try {
+        // First try standard JSON parse
+        const parsed = JSON.parse(trimmed);
+        return recursivelyParseStrings(parsed, depth + 1);
+      } catch {
+        // Try fixing it as Python dict
+        try {
+          const fixed = convertPythonToJson(trimmed);
+          const fixedTrailing = fixTrailingCommas(fixed);
+          const parsed = JSON.parse(fixedTrailing);
+          return recursivelyParseStrings(parsed, depth + 1);
+        } catch {
+          // Can't parse, return original string
+          return value;
+        }
+      }
+    }
+  }
+
+  return value;
 }
 
 /**
