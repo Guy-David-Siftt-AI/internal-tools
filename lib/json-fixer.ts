@@ -115,31 +115,55 @@ function recursivelyParseStrings(value: unknown, depth: number = 0): unknown {
 
   if (typeof value === "string") {
     const trimmed = value.trim();
+
     // Check if it looks like a JSON object or array, or Python dict/list
     if (
       (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
       (trimmed.startsWith("[") && trimmed.endsWith("]"))
     ) {
-      try {
-        // First try standard JSON parse
-        const parsed = JSON.parse(trimmed);
+      const parsed = tryParseJsonOrPython(trimmed);
+      if (parsed !== null) {
         return recursivelyParseStrings(parsed, depth + 1);
-      } catch {
-        // Try fixing it as Python dict
-        try {
-          const fixed = convertPythonToJson(trimmed);
-          const fixedTrailing = fixTrailingCommas(fixed);
-          const parsed = JSON.parse(fixedTrailing);
-          return recursivelyParseStrings(parsed, depth + 1);
-        } catch {
-          // Can't parse, return original string
-          return value;
-        }
+      }
+    }
+
+    // Check for strings with a prefix before the JSON/Python dict
+    // e.g., "extractor_request: {'key': 'value'}"
+    const prefixMatch = trimmed.match(/^([^{[]+?):\s*(\{[\s\S]*\}|\[[\s\S]*\])$/);
+    if (prefixMatch) {
+      const prefix = prefixMatch[1].trim();
+      const jsonPart = prefixMatch[2];
+      const parsed = tryParseJsonOrPython(jsonPart);
+      if (parsed !== null) {
+        return {
+          _prefix: prefix,
+          _data: recursivelyParseStrings(parsed, depth + 1),
+        };
       }
     }
   }
 
   return value;
+}
+
+/**
+ * Try to parse a string as JSON or Python dict
+ * Returns the parsed value or null if parsing fails
+ */
+function tryParseJsonOrPython(input: string): unknown {
+  // First try standard JSON parse
+  try {
+    return JSON.parse(input);
+  } catch {
+    // Try fixing it as Python dict
+    try {
+      const fixed = convertPythonToJson(input);
+      const fixedTrailing = fixTrailingCommas(fixed);
+      return JSON.parse(fixedTrailing);
+    } catch {
+      return null;
+    }
+  }
 }
 
 /**
