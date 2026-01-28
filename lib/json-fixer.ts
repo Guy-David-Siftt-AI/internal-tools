@@ -141,24 +141,33 @@ function fixQuotes(input: string): string {
 
     // Handle single-quoted strings (convert to double quotes)
     if (char === "'") {
-      // Collect the string content
+      // Collect the string content (as actual characters, not escape sequences)
       let stringContent = "";
       i++; // Skip opening quote
 
       while (i < input.length) {
         const c = input[i];
 
-        // Handle escaped characters
+        // Handle escape sequences - convert to actual characters
         if (c === '\\' && i + 1 < input.length) {
           const nextChar = input[i + 1];
-          if (nextChar === "'") {
-            // Escaped single quote -> just add the quote
-            stringContent += "'";
-            i += 2;
+          if (nextChar === "'" || nextChar === '"') {
+            // Escaped quote -> literal quote
+            stringContent += nextChar;
+          } else if (nextChar === "\\") {
+            // Escaped backslash -> single backslash
+            stringContent += "\\";
+          } else if (nextChar === "n") {
+            stringContent += "\n";
+          } else if (nextChar === "t") {
+            stringContent += "\t";
+          } else if (nextChar === "r") {
+            stringContent += "\r";
           } else {
-            stringContent += c + nextChar;
-            i += 2;
+            // Unknown escape -> just the character (not the backslash)
+            stringContent += nextChar;
           }
+          i += 2;
           continue;
         }
 
@@ -185,13 +194,23 @@ function fixQuotes(input: string): string {
         i++;
       }
 
-      // Escape any double quotes and backslashes inside the content
-      const escapedContent = stringContent
-        .replace(/\\/g, '\\\\')
-        .replace(/"/g, '\\"')
-        .replace(/\n/g, '\\n')
-        .replace(/\r/g, '\\r')
-        .replace(/\t/g, '\\t');
+      // Now escape for JSON output (order matters: backslashes first!)
+      let escapedContent = "";
+      for (const ch of stringContent) {
+        if (ch === "\\") {
+          escapedContent += "\\\\";
+        } else if (ch === '"') {
+          escapedContent += '\\"';
+        } else if (ch === "\n") {
+          escapedContent += "\\n";
+        } else if (ch === "\r") {
+          escapedContent += "\\r";
+        } else if (ch === "\t") {
+          escapedContent += "\\t";
+        } else {
+          escapedContent += ch;
+        }
+      }
 
       result.push('"' + escapedContent + '"');
       continue;
