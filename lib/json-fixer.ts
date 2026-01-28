@@ -34,25 +34,25 @@ export function fixJson(input: string): JsonFixResult {
 
   // Apply fixes in sequence
 
-  // Fix 1: Handle JavaScript-style comments first (before quote processing)
+  // Fix 1: Remove comments first
   const beforeComments = processed;
   processed = removeComments(processed);
   if (processed !== beforeComments) {
     fixes.push("Removed JavaScript comments");
   }
 
-  // Fix 2: Convert quotes (handles mixed single/double quotes and apostrophes)
-  const beforeQuotes = processed;
-  processed = fixQuotes(processed);
-  if (processed !== beforeQuotes) {
-    fixes.push("Fixed quote formatting");
+  // Fix 2: Convert Python dict to JSON using a safe approach
+  const beforePython = processed;
+  processed = convertPythonToJson(processed);
+  if (processed !== beforePython) {
+    fixes.push("Converted Python dict syntax to JSON");
   }
 
-  // Fix 3: Replace Python literals (None, True, False) - AFTER quote conversion
-  const beforePython = processed;
-  processed = fixPythonLiterals(processed);
-  if (processed !== beforePython) {
-    fixes.push("Converted Python literals (None/True/False) to JSON");
+  // Fix 3: Fix trailing commas
+  const beforeTrailing = processed;
+  processed = fixTrailingCommas(processed);
+  if (processed !== beforeTrailing) {
+    fixes.push("Removed trailing commas");
   }
 
   // Fix 4: Add quotes to unquoted keys
@@ -60,27 +60,6 @@ export function fixJson(input: string): JsonFixResult {
   processed = fixUnquotedKeys(processed);
   if (processed !== beforeKeys) {
     fixes.push("Added quotes to unquoted keys");
-  }
-
-  // Fix 5: Fix trailing commas
-  const beforeTrailing = processed;
-  processed = fixTrailingCommas(processed);
-  if (processed !== beforeTrailing) {
-    fixes.push("Removed trailing commas");
-  }
-
-  // Fix 6: Fix unquoted string values
-  const beforeValues = processed;
-  processed = fixUnquotedValues(processed);
-  if (processed !== beforeValues) {
-    fixes.push("Added quotes to unquoted string values");
-  }
-
-  // Fix 7: Fix missing commas between elements
-  const beforeMissingCommas = processed;
-  processed = fixMissingCommas(processed);
-  if (processed !== beforeMissingCommas) {
-    fixes.push("Added missing commas between elements");
   }
 
   // Try parsing the fixed JSON
@@ -107,116 +86,58 @@ export function fixJson(input: string): JsonFixResult {
 }
 
 /**
- * Fix quotes - handles mixed single/double quotes and apostrophes in strings
+ * Convert Python dict syntax to JSON
+ * Handles: single quotes, None, True, False
  */
-function fixQuotes(input: string): string {
+function convertPythonToJson(input: string): string {
+  // We'll process the string, keeping track of whether we're in a string
   const result: string[] = [];
   let i = 0;
 
   while (i < input.length) {
     const char = input[i];
 
-    // Handle double-quoted strings (pass through as-is)
+    // Handle double-quoted strings (JSON-style) - pass through unchanged
     if (char === '"') {
-      result.push(char);
-      i++;
-      // Read until closing double quote
-      while (i < input.length) {
-        const c = input[i];
-        if (c === '\\' && i + 1 < input.length) {
-          // Escaped character - push both
-          result.push(c, input[i + 1]);
-          i += 2;
-        } else if (c === '"') {
-          result.push(c);
-          i++;
-          break;
-        } else {
-          result.push(c);
-          i++;
-        }
-      }
+      const [str, newIndex] = readDoubleQuotedString(input, i);
+      result.push(str);
+      i = newIndex;
       continue;
     }
 
-    // Handle single-quoted strings (convert to double quotes)
+    // Handle single-quoted strings (Python-style) - convert to double quotes
     if (char === "'") {
-      // Collect the string content (as actual characters, not escape sequences)
-      let stringContent = "";
-      i++; // Skip opening quote
-
-      while (i < input.length) {
-        const c = input[i];
-
-        // Handle escape sequences - convert to actual characters
-        if (c === '\\' && i + 1 < input.length) {
-          const nextChar = input[i + 1];
-          if (nextChar === "'" || nextChar === '"') {
-            // Escaped quote -> literal quote
-            stringContent += nextChar;
-          } else if (nextChar === "\\") {
-            // Escaped backslash -> single backslash
-            stringContent += "\\";
-          } else if (nextChar === "n") {
-            stringContent += "\n";
-          } else if (nextChar === "t") {
-            stringContent += "\t";
-          } else if (nextChar === "r") {
-            stringContent += "\r";
-          } else {
-            // Unknown escape -> just the character (not the backslash)
-            stringContent += nextChar;
-          }
-          i += 2;
-          continue;
-        }
-
-        // Check for closing quote
-        if (c === "'") {
-          // Look ahead to determine if this is a closing quote or an apostrophe
-          const nextChar = input[i + 1] || "";
-
-          // It's a closing quote if followed by structural characters or end of input
-          const isClosingQuote = /^[\s,\]\}:\[]/.test(nextChar) || i + 1 >= input.length;
-
-          if (isClosingQuote) {
-            i++; // Skip closing quote
-            break;
-          } else {
-            // It's an apostrophe inside the string
-            stringContent += c;
-            i++;
-            continue;
-          }
-        }
-
-        stringContent += c;
-        i++;
-      }
-
-      // Now escape for JSON output (order matters: backslashes first!)
-      let escapedContent = "";
-      for (const ch of stringContent) {
-        if (ch === "\\") {
-          escapedContent += "\\\\";
-        } else if (ch === '"') {
-          escapedContent += '\\"';
-        } else if (ch === "\n") {
-          escapedContent += "\\n";
-        } else if (ch === "\r") {
-          escapedContent += "\\r";
-        } else if (ch === "\t") {
-          escapedContent += "\\t";
-        } else {
-          escapedContent += ch;
-        }
-      }
-
-      result.push('"' + escapedContent + '"');
+      const [str, newIndex] = readSingleQuotedString(input, i);
+      result.push(str);
+      i = newIndex;
       continue;
     }
 
-    // Any other character - pass through
+    // Handle Python literals (None, True, False) outside of strings
+    const remaining = input.slice(i);
+
+    const noneMatch = remaining.match(/^None(?![a-zA-Z0-9_])/);
+    if (noneMatch) {
+      result.push("null");
+      i += 4;
+      continue;
+    }
+
+    const trueMatch = remaining.match(/^True(?![a-zA-Z0-9_])/);
+    if (trueMatch) {
+      result.push("true");
+      i += 4;
+      continue;
+    }
+
+    const falseMatch = remaining.match(/^False(?![a-zA-Z0-9_])/);
+    if (falseMatch) {
+      result.push("false");
+      i += 5;
+      continue;
+    }
+
+    // Pass through any other character
     result.push(char);
     i++;
   }
@@ -225,101 +146,147 @@ function fixQuotes(input: string): string {
 }
 
 /**
- * Replace Python literals with JSON equivalents
- * Only replaces when they appear as values (not inside strings)
+ * Read a double-quoted string starting at position i
+ * Returns the string (unchanged) and the new position after the string
  */
-function fixPythonLiterals(input: string): string {
-  // Since we've already converted to proper double-quoted strings,
-  // we can safely replace Python literals that appear outside of strings
-
-  let result = "";
-  let i = 0;
+function readDoubleQuotedString(input: string, start: number): [string, number] {
+  let i = start + 1; // Skip opening quote
+  let result = '"';
 
   while (i < input.length) {
-    const char = input[i];
+    const c = input[i];
 
-    // Skip over double-quoted strings
-    if (char === '"') {
-      result += char;
-      i++;
-      while (i < input.length) {
-        const c = input[i];
+    if (c === "\\") {
+      // Escape sequence - include both characters
+      if (i + 1 < input.length) {
+        result += c + input[i + 1];
+        i += 2;
+      } else {
         result += c;
-        if (c === '\\' && i + 1 < input.length) {
-          result += input[i + 1];
-          i += 2;
-        } else if (c === '"') {
-          i++;
-          break;
-        } else {
-          i++;
-        }
+        i++;
       }
-      continue;
+    } else if (c === '"') {
+      // Closing quote
+      result += c;
+      i++;
+      break;
+    } else {
+      result += c;
+      i++;
     }
-
-    // Check for Python literals
-    const remaining = input.slice(i);
-
-    if (remaining.match(/^None(?![a-zA-Z0-9_])/)) {
-      result += "null";
-      i += 4;
-      continue;
-    }
-
-    if (remaining.match(/^True(?![a-zA-Z0-9_])/)) {
-      result += "true";
-      i += 4;
-      continue;
-    }
-
-    if (remaining.match(/^False(?![a-zA-Z0-9_])/)) {
-      result += "false";
-      i += 5;
-      continue;
-    }
-
-    result += char;
-    i++;
   }
 
-  return result;
+  return [result, i];
 }
 
 /**
- * Add quotes to unquoted object keys
+ * Read a single-quoted string starting at position i
+ * Returns a JSON-compatible double-quoted string and the new position
  */
-function fixUnquotedKeys(input: string): string {
-  // Match unquoted keys followed by a colon
-  return input.replace(
-    /([{,]\s*)([a-zA-Z_$][a-zA-Z0-9_$]*)(\s*:)/g,
-    '$1"$2"$3'
-  );
-}
+function readSingleQuotedString(input: string, start: number): [string, number] {
+  let i = start + 1; // Skip opening quote
+  let content = "";
 
-/**
- * Remove trailing commas before closing brackets
- */
-function fixTrailingCommas(input: string): string {
-  return input
-    .replace(/,(\s*})/g, "$1")
-    .replace(/,(\s*\])/g, "$1");
-}
+  while (i < input.length) {
+    const c = input[i];
 
-/**
- * Fix unquoted string values (basic cases)
- */
-function fixUnquotedValues(input: string): string {
-  return input.replace(
-    /(:\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*[,}\]])/g,
-    (match, prefix, value, suffix) => {
-      // Don't quote known JSON values
-      if (["true", "false", "null"].includes(value)) {
-        return match;
+    if (c === "\\") {
+      // Escape sequence
+      if (i + 1 < input.length) {
+        const nextChar = input[i + 1];
+        if (nextChar === "'") {
+          // Escaped single quote -> literal single quote
+          content += "'";
+        } else if (nextChar === '"') {
+          // Escaped double quote -> literal double quote
+          content += '"';
+        } else if (nextChar === "\\") {
+          // Escaped backslash -> single backslash
+          content += "\\";
+        } else if (nextChar === "n") {
+          content += "\n";
+        } else if (nextChar === "t") {
+          content += "\t";
+        } else if (nextChar === "r") {
+          content += "\r";
+        } else if (nextChar === "b") {
+          content += "\b";
+        } else if (nextChar === "f") {
+          content += "\f";
+        } else if (nextChar === "x" && i + 3 < input.length) {
+          // Hex escape \xNN
+          const hex = input.slice(i + 2, i + 4);
+          const charCode = parseInt(hex, 16);
+          if (!isNaN(charCode)) {
+            content += String.fromCharCode(charCode);
+            i += 4;
+            continue;
+          }
+          content += nextChar;
+        } else if (nextChar === "u" && i + 5 < input.length) {
+          // Unicode escape \uNNNN
+          const hex = input.slice(i + 2, i + 6);
+          const charCode = parseInt(hex, 16);
+          if (!isNaN(charCode)) {
+            content += String.fromCharCode(charCode);
+            i += 6;
+            continue;
+          }
+          content += nextChar;
+        } else {
+          // Unknown escape - just include the character
+          content += nextChar;
+        }
+        i += 2;
+      } else {
+        i++;
       }
-      return `${prefix}"${value}"${suffix}`;
+    } else if (c === "'") {
+      // Closing quote
+      i++;
+      break;
+    } else {
+      content += c;
+      i++;
     }
-  );
+  }
+
+  // Convert content to JSON-safe string
+  const jsonString = escapeForJson(content);
+  return ['"' + jsonString + '"', i];
+}
+
+/**
+ * Escape a string for JSON output
+ */
+function escapeForJson(str: string): string {
+  let result = "";
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    const code = ch.charCodeAt(0);
+
+    if (ch === "\\") {
+      result += "\\\\";
+    } else if (ch === '"') {
+      result += '\\"';
+    } else if (ch === "\n") {
+      result += "\\n";
+    } else if (ch === "\r") {
+      result += "\\r";
+    } else if (ch === "\t") {
+      result += "\\t";
+    } else if (ch === "\b") {
+      result += "\\b";
+    } else if (ch === "\f") {
+      result += "\\f";
+    } else if (code < 32) {
+      // Other control characters
+      result += "\\u" + code.toString(16).padStart(4, "0");
+    } else {
+      result += ch;
+    }
+  }
+  return result;
 }
 
 /**
@@ -331,40 +298,47 @@ function removeComments(input: string): string {
 
   while (i < input.length) {
     // Skip strings
-    if (input[i] === '"' || input[i] === "'") {
-      const quote = input[i];
+    if (input[i] === '"') {
+      const [str, newIndex] = readDoubleQuotedString(input, i);
+      result += str;
+      i = newIndex;
+      continue;
+    }
+
+    if (input[i] === "'") {
+      // For comments, just skip single-quoted strings
       result += input[i];
       i++;
-      while (i < input.length) {
-        if (input[i] === '\\' && i + 1 < input.length) {
+      while (i < input.length && input[i] !== "'") {
+        if (input[i] === "\\" && i + 1 < input.length) {
           result += input[i] + input[i + 1];
           i += 2;
-        } else if (input[i] === quote) {
-          result += input[i];
-          i++;
-          break;
         } else {
           result += input[i];
           i++;
         }
       }
+      if (i < input.length) {
+        result += input[i];
+        i++;
+      }
       continue;
     }
 
     // Check for comments
-    if (input[i] === '/' && i + 1 < input.length) {
-      if (input[i + 1] === '/') {
-        // Single-line comment - skip until newline
+    if (input[i] === "/" && i + 1 < input.length) {
+      if (input[i + 1] === "/") {
+        // Single-line comment
         i += 2;
-        while (i < input.length && input[i] !== '\n') {
+        while (i < input.length && input[i] !== "\n") {
           i++;
         }
         continue;
-      } else if (input[i + 1] === '*') {
-        // Multi-line comment - skip until */
+      } else if (input[i + 1] === "*") {
+        // Multi-line comment
         i += 2;
         while (i < input.length - 1) {
-          if (input[i] === '*' && input[i + 1] === '/') {
+          if (input[i] === "*" && input[i + 1] === "/") {
             i += 2;
             break;
           }
@@ -382,15 +356,23 @@ function removeComments(input: string): string {
 }
 
 /**
- * Fix missing commas between array elements or object properties
+ * Remove trailing commas before closing brackets
  */
-function fixMissingCommas(input: string): string {
-  let result = input.replace(/(")\s*\n\s*(")/g, '$1,\n$2');
-  result = result.replace(/(})\s*\n\s*({)/g, '$1,\n$2');
-  result = result.replace(/(\])\s*\n\s*(\[)/g, '$1,\n$2');
-  result = result.replace(/(})\s*\n\s*(")/g, '$1,\n$2');
-  result = result.replace(/(")\s*\n\s*({)/g, '$1,\n$2');
-  return result;
+function fixTrailingCommas(input: string): string {
+  // Simple approach - just remove commas before } or ]
+  return input
+    .replace(/,(\s*})/g, "$1")
+    .replace(/,(\s*\])/g, "$1");
+}
+
+/**
+ * Add quotes to unquoted object keys
+ */
+function fixUnquotedKeys(input: string): string {
+  return input.replace(
+    /([{,]\s*)([a-zA-Z_$][a-zA-Z0-9_$]*)(\s*:)/g,
+    '$1"$2"$3'
+  );
 }
 
 /**
