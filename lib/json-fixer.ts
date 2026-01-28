@@ -35,41 +35,49 @@ export function fixJson(input: string): JsonFixResult {
   // Apply fixes in sequence
   const originalProcessed = processed;
 
-  // Fix 1: Replace single quotes with double quotes
+  // Fix 1: Replace Python literals (None, True, False)
+  const beforePython = processed;
+  processed = fixPythonLiterals(processed);
+  if (processed !== beforePython) {
+    fixes.push("Converted Python literals (None/True/False) to JSON");
+  }
+
+  // Fix 2: Replace single quotes with double quotes (smart handling)
+  const beforeQuotes = processed;
   processed = fixSingleQuotes(processed);
-  if (processed !== originalProcessed) {
+  if (processed !== beforeQuotes) {
     fixes.push("Converted single quotes to double quotes");
   }
 
-  // Fix 2: Add quotes to unquoted keys
+  // Fix 3: Add quotes to unquoted keys
   const beforeKeys = processed;
   processed = fixUnquotedKeys(processed);
   if (processed !== beforeKeys) {
     fixes.push("Added quotes to unquoted keys");
   }
 
-  // Fix 3: Fix trailing commas
+  // Fix 4: Fix trailing commas
   const beforeTrailing = processed;
   processed = fixTrailingCommas(processed);
   if (processed !== beforeTrailing) {
     fixes.push("Removed trailing commas");
   }
 
-  // Fix 4: Fix unquoted string values
+  // Fix 5: Fix unquoted string values
   const beforeValues = processed;
   processed = fixUnquotedValues(processed);
   if (processed !== beforeValues) {
     fixes.push("Added quotes to unquoted string values");
   }
 
-  // Fix 5: Handle JavaScript-style comments
+  // Fix 6: Handle JavaScript-style comments
   const beforeComments = processed;
   processed = removeComments(processed);
   if (processed !== beforeComments) {
     fixes.push("Removed JavaScript comments");
   }
 
-  // Fix 6: Fix missing commas between elements
+  // Fix 7: Fix missing commas between elements
   const beforeMissingCommas = processed;
   processed = fixMissingCommas(processed);
   if (processed !== beforeMissingCommas) {
@@ -100,37 +108,80 @@ export function fixJson(input: string): JsonFixResult {
 }
 
 /**
- * Replace single quotes with double quotes, being careful about nested quotes
+ * Replace Python literals with JSON equivalents
+ */
+function fixPythonLiterals(input: string): string {
+  let result = input;
+
+  // Replace None with null (word boundary to avoid replacing inside strings)
+  result = result.replace(/\bNone\b/g, "null");
+
+  // Replace True with true
+  result = result.replace(/\bTrue\b/g, "true");
+
+  // Replace False with false
+  result = result.replace(/\bFalse\b/g, "false");
+
+  return result;
+}
+
+/**
+ * Replace single quotes with double quotes, handling apostrophes inside strings
  */
 function fixSingleQuotes(input: string): string {
-  let result = "";
-  let inDoubleQuote = false;
-  let inSingleQuote = false;
+  const result: string[] = [];
   let i = 0;
 
   while (i < input.length) {
     const char = input[i];
-    const prevChar = i > 0 ? input[i - 1] : "";
 
-    if (char === '"' && prevChar !== "\\") {
-      if (!inSingleQuote) {
-        inDoubleQuote = !inDoubleQuote;
+    // Check if this is a single-quoted string
+    if (char === "'") {
+      // Find the end of this single-quoted string
+      let stringContent = "";
+      i++; // Skip opening quote
+
+      while (i < input.length) {
+        const c = input[i];
+
+        // Handle escaped characters
+        if (c === "\\" && i + 1 < input.length) {
+          stringContent += c + input[i + 1];
+          i += 2;
+          continue;
+        }
+
+        // Check for closing quote
+        // A single quote followed by certain characters is likely a closing quote
+        if (c === "'") {
+          const nextChar = input[i + 1] || "";
+          const isClosingQuote = /[\s,\]\}:]/.test(nextChar) || i + 1 >= input.length;
+
+          if (isClosingQuote) {
+            break; // End of string
+          } else {
+            // This is likely an apostrophe inside the string
+            stringContent += c;
+            i++;
+            continue;
+          }
+        }
+
+        stringContent += c;
+        i++;
       }
-      result += char;
-    } else if (char === "'" && prevChar !== "\\") {
-      if (!inDoubleQuote) {
-        inSingleQuote = !inSingleQuote;
-        result += '"';
-      } else {
-        result += char;
-      }
+
+      // Escape any double quotes inside the content and wrap with double quotes
+      const escapedContent = stringContent.replace(/"/g, '\\"');
+      result.push('"' + escapedContent + '"');
+      i++; // Skip closing quote
     } else {
-      result += char;
+      result.push(char);
+      i++;
     }
-    i++;
   }
 
-  return result;
+  return result.join("");
 }
 
 /**
@@ -138,7 +189,6 @@ function fixSingleQuotes(input: string): string {
  */
 function fixUnquotedKeys(input: string): string {
   // Match unquoted keys followed by a colon
-  // This regex looks for word characters (and some special chars) that aren't quoted
   return input.replace(
     /([{,]\s*)([a-zA-Z_$][a-zA-Z0-9_$]*)(\s*:)/g,
     '$1"$2"$3'
@@ -149,7 +199,6 @@ function fixUnquotedKeys(input: string): string {
  * Remove trailing commas before closing brackets
  */
 function fixTrailingCommas(input: string): string {
-  // Remove trailing commas before } or ]
   return input
     .replace(/,(\s*})/g, "$1")
     .replace(/,(\s*\])/g, "$1");
@@ -159,8 +208,6 @@ function fixTrailingCommas(input: string): string {
  * Fix unquoted string values (basic cases)
  */
 function fixUnquotedValues(input: string): string {
-  // This is tricky - we need to identify unquoted values that should be strings
-  // Match patterns like: "key": value where value is not a number, boolean, null, or already quoted
   return input.replace(
     /(:\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*[,}\]])/g,
     (match, prefix, value, suffix) => {
@@ -188,9 +235,7 @@ function removeComments(input: string): string {
  * Fix missing commas between array elements or object properties
  */
 function fixMissingCommas(input: string): string {
-  // Fix missing commas between strings: "value1" "value2" -> "value1", "value2"
   let result = input.replace(/(")\s*\n\s*(")/g, '$1,\n$2');
-  // Fix missing commas between closing and opening braces/brackets
   result = result.replace(/(})\s*\n\s*({)/g, '$1,\n$2');
   result = result.replace(/(\])\s*\n\s*(\[)/g, '$1,\n$2');
   result = result.replace(/(})\s*\n\s*(")/g, '$1,\n$2');
