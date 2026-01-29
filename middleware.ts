@@ -1,5 +1,8 @@
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 
+// TEMP: Auth disabled for testing - set to false to re-enable
+const AUTH_DISABLED = true;
+
 // Define public routes that don't require authentication
 const isPublicRoute = createRouteMatcher([
   "/sign-in(.*)",
@@ -7,6 +10,8 @@ const isPublicRoute = createRouteMatcher([
 ]);
 
 export default clerkMiddleware(async (auth, request) => {
+  if (AUTH_DISABLED) return; // Skip auth check
+
   if (!isPublicRoute(request)) {
     await auth.protect();
   }
