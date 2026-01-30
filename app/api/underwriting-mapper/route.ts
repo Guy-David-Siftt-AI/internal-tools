@@ -14,14 +14,15 @@ export async function POST(request: NextRequest) {
     const action = formData.get("action") as string || "generate";
     const useAI = formData.get("useAI") === "true";
     const aiNotes = formData.get("aiNotes") as string || "";
+    const aiModel = formData.get("aiModel") as string || "gemini-2.0-flash";
 
     if (!file) {
       return NextResponse.json({ error: "No file provided" }, { status: 400 });
     }
 
-    if (!file.name.match(/\.(xlsx|xls)$/i)) {
+    if (!file.name.match(/\.(xlsx|xlsm|xls)$/i)) {
       return NextResponse.json(
-        { error: "File must be an Excel file (.xlsx or .xls)" },
+        { error: "File must be an Excel file (.xlsx, .xlsm, or .xls)" },
         { status: 400 }
       );
     }
@@ -50,7 +51,7 @@ export async function POST(request: NextRequest) {
 
       case "generate":
       default:
-        return handleGenerate(buffer, analysis, useAI, aiNotes);
+        return handleGenerate(buffer, analysis, useAI, aiNotes, aiModel);
     }
   } catch (error) {
     console.error("Error processing Excel file:", error);
@@ -126,7 +127,8 @@ async function handleGenerate(
   buffer: ArrayBuffer,
   analysis: Awaited<ReturnType<typeof analyzeExcelFile>>,
   useAI: boolean = false,
-  aiNotes: string = ""
+  aiNotes: string = "",
+  aiModel: string = "gemini-2.0-flash"
 ) {
   const mappings: Record<string, SheetMapping> = {};
   const sheetDetails: {
@@ -144,9 +146,13 @@ async function handleGenerate(
       if (sheetType === "summary") continue;
 
       // Generate mapping (with or without AI)
+      console.log(`[API] Processing sheet "${sheet.name}" (type: ${sheetType}), useAI: ${useAI}`);
+
       const mapping = useAI
-        ? await generateMappingWithAI(sheetAnalysis, sheetType, aiNotes)
+        ? await generateMappingWithAI(sheetAnalysis, sheetType, aiNotes, aiModel)
         : generateMapping(sheetAnalysis);
+
+      console.log(`[API] Generated mapping for "${sheet.name}" with ${Object.keys(mapping).length - 1} fields`);
 
       const fieldCount = Object.keys(mapping).length - 1; // Exclude sheet_name
 

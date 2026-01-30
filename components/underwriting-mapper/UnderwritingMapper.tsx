@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import FileUpload from "./FileUpload";
 import MappingOutput from "./MappingOutput";
 
@@ -47,6 +47,15 @@ interface ResultData {
   warnings?: string[];
 }
 
+interface HistoryItem {
+  id: string;
+  fileName: string;
+  timestamp: Date;
+  action: ActionType;
+  result: ResultData;
+  selectedMapping: string | null;
+}
+
 interface AvailableSheets {
   names: string[];
   modelName: string;
@@ -55,18 +64,88 @@ interface AvailableSheets {
 export default function UnderwritingMapper() {
   const [action, setAction] = useState<ActionType>("generate");
   const [isProcessing, setIsProcessing] = useState(false);
-  const [result, setResult] = useState<ResultData | null>(null);
+  const [resultsByAction, setResultsByAction] = useState<Partial<Record<ActionType, ResultData | null>>>({});
   const [error, setError] = useState<string | null>(null);
-  const [selectedMapping, setSelectedMapping] = useState<string | null>(null);
+  const [selectedMappingByAction, setSelectedMappingByAction] = useState<Partial<Record<ActionType, string | null>>>({});
   const [selectedSheet, setSelectedSheet] = useState<string>("");
   const [currentFile, setCurrentFile] = useState<File | null>(null);
   const [validateInput, setValidateInput] = useState("");
-  const [availableSheets, setAvailableSheets] = useState<AvailableSheets | null>(null);
+  const [availableSheetsByAction, setAvailableSheetsByAction] = useState<Partial<Record<ActionType, AvailableSheets | null>>>({});
   const [useAI, setUseAI] = useState(false);
   const [aiNotes, setAiNotes] = useState("");
+  const [aiModel, setAiModel] = useState("gemini-2.0-flash");
+  const [uploadKey, setUploadKey] = useState(0);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [viewingHistoryId, setViewingHistoryId] = useState<string | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  // Derived values for current action
+  const result = resultsByAction[action] ?? null;
+  const selectedMapping = selectedMappingByAction[action] ?? null;
+  const availableSheets = availableSheetsByAction[action] ?? null;
+
+  // Setters for current action
+  const setResult = (data: ResultData | null) => {
+    setResultsByAction(prev => ({ ...prev, [action]: data }));
+  };
+  const setSelectedMapping = (mapping: string | null) => {
+    setSelectedMappingByAction(prev => ({ ...prev, [action]: mapping }));
+  };
+  const setAvailableSheets = (sheets: AvailableSheets | null) => {
+    setAvailableSheetsByAction(prev => ({ ...prev, [action]: sheets }));
+  };
+
+  // Refs to avoid stale closures in handleFileUpload
+  const resultRef = useRef<ResultData | null>(null);
+  const currentFileRef = useRef<File | null>(null);
+  const selectedMappingRef = useRef<string | null>(null);
+  const actionRef = useRef<ActionType>(action);
+
+  const availableModels = [
+    { value: "gemini-1.5-flash", label: "Gemini 1.5 Flash" },
+    { value: "gemini-1.5-flash-8b", label: "Gemini 1.5 Flash 8B" },
+    { value: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
+    { value: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash Lite" },
+    { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+    { value: "gemini-3-flash-preview", label: "Gemini 3.0 Flash" },
+  ];
+
+  // Sync refs with state for use in callbacks
+  useEffect(() => { resultRef.current = resultsByAction[actionRef.current] ?? null; }, [resultsByAction]);
+  useEffect(() => { currentFileRef.current = currentFile; }, [currentFile]);
+  useEffect(() => { selectedMappingRef.current = selectedMappingByAction[actionRef.current] ?? null; }, [selectedMappingByAction]);
+  useEffect(() => { actionRef.current = action; }, [action]);
+
+  // Clear viewingHistoryId if the history item no longer exists
+  useEffect(() => {
+    if (viewingHistoryId && !history.find(h => h.id === viewingHistoryId)) {
+      setViewingHistoryId(null);
+    }
+  }, [viewingHistoryId, history]);
 
   const handleFileUpload = useCallback(
     async (file: File) => {
+      // Cancel any previous request
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      abortControllerRef.current = new AbortController();
+      const signal = abortControllerRef.current.signal;
+
+      // Save current extraction to history before clearing (use refs to avoid stale closures)
+      if (resultRef.current && currentFileRef.current) {
+        const historyItem: HistoryItem = {
+          id: Date.now().toString(),
+          fileName: currentFileRef.current.name,
+          timestamp: new Date(),
+          action: resultRef.current.action as ActionType,
+          result: resultRef.current,
+          selectedMapping: selectedMappingRef.current,
+        };
+        setHistory(prev => [historyItem, ...prev].slice(0, 10)); // Keep max 10
+      }
+      setViewingHistoryId(null);
+
       setCurrentFile(file);
       setIsProcessing(true);
       setError(null);
@@ -83,6 +162,7 @@ export default function UnderwritingMapper() {
           const response = await fetch("/api/underwriting-mapper", {
             method: "POST",
             body: formData,
+            signal,
           });
 
           const data = await response.json();
@@ -106,6 +186,7 @@ export default function UnderwritingMapper() {
         formData.append("action", action);
         if (useAI) {
           formData.append("useAI", "true");
+          formData.append("aiModel", aiModel);
           if (aiNotes.trim()) {
             formData.append("aiNotes", aiNotes.trim());
           }
@@ -114,6 +195,7 @@ export default function UnderwritingMapper() {
         const response = await fetch("/api/underwriting-mapper", {
           method: "POST",
           body: formData,
+          signal,
         });
 
         const data = await response.json();
@@ -137,13 +219,27 @@ export default function UnderwritingMapper() {
           setSelectedMapping(Object.keys(data.mappings)[0]);
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "An error occurred");
+        if (err instanceof Error && err.name === "AbortError") {
+          setError("Request cancelled");
+        } else {
+          setError(err instanceof Error ? err.message : "An error occurred");
+        }
       } finally {
         setIsProcessing(false);
+        abortControllerRef.current = null;
       }
     },
-    [action, useAI, aiNotes]
+    [action, useAI, aiNotes, aiModel]
   );
+
+  const handleCancel = useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsProcessing(false);
+    setError("Request cancelled");
+  }, []);
 
   const handleListFields = async (sheetName: string) => {
     if (!currentFile) return;
@@ -208,14 +304,24 @@ export default function UnderwritingMapper() {
   };
 
   const handleClear = () => {
-    setResult(null);
+    setResultsByAction(prev => ({ ...prev, [action]: null }));
+    setSelectedMappingByAction(prev => ({ ...prev, [action]: null }));
+    setAvailableSheetsByAction(prev => ({ ...prev, [action]: null }));
     setError(null);
-    setSelectedMapping(null);
     setCurrentFile(null);
     setValidateInput("");
-    setAvailableSheets(null);
     setSelectedSheet("");
+    setViewingHistoryId(null);
+    setUploadKey(prev => prev + 1); // Force FileUpload to re-render and reset file input
   };
+
+  // Compute active result and selected mapping based on whether viewing history
+  const viewingHistoryItem = viewingHistoryId ? history.find(h => h.id === viewingHistoryId) : null;
+  const activeResult = viewingHistoryItem?.result || result;
+  const activeSelectedMapping = viewingHistoryItem?.selectedMapping ?? selectedMapping;
+
+  // Filter history by current action
+  const filteredHistory = history.filter(h => h.action === action);
 
   const handleDownload = (key: string, mapping: unknown) => {
     const blob = new Blob([JSON.stringify(mapping, null, 2)], {
@@ -232,39 +338,61 @@ export default function UnderwritingMapper() {
   };
 
   const handleDownloadAll = () => {
-    if (!result?.mappings) return;
+    const targetResult = viewingHistoryItem?.result || result;
+    if (!targetResult?.mappings) return;
 
-    for (const [key, mapping] of Object.entries(result.mappings)) {
+    for (const [key, mapping] of Object.entries(targetResult.mappings)) {
       handleDownload(key, mapping);
     }
   };
 
+  const handleSelectHistoryItem = (historyId: string) => {
+    setViewingHistoryId(historyId);
+  };
+
+  const handleBackToCurrent = () => {
+    setViewingHistoryId(null);
+  };
+
+  const handleDeleteHistoryItem = (historyId: string) => {
+    setHistory(prev => prev.filter(h => h.id !== historyId));
+    if (viewingHistoryId === historyId) {
+      setViewingHistoryId(null);
+    }
+  };
+
+  const handleHistoryMappingSelect = (historyId: string, mappingKey: string) => {
+    setHistory(prev => prev.map(h =>
+      h.id === historyId ? { ...h, selectedMapping: mappingKey } : h
+    ));
+  };
+
   const getOutputContent = (): Record<string, unknown> | unknown[] | null => {
-    if (!result) return null;
+    if (!activeResult) return null;
 
-    if (result.action === "analyze" && result.sheets) {
-      return result.sheets as unknown[];
+    if (activeResult.action === "analyze" && activeResult.sheets) {
+      return activeResult.sheets as unknown[];
     }
 
-    if (result.action === "list-fields") {
+    if (activeResult.action === "list-fields") {
       return {
-        sheetName: result.sheetName,
-        inputCells: result.inputCells,
-        monthlyPatterns: result.monthlyPatterns,
+        sheetName: activeResult.sheetName,
+        inputCells: activeResult.inputCells,
+        monthlyPatterns: activeResult.monthlyPatterns,
       };
     }
 
-    if (result.action === "validate") {
+    if (activeResult.action === "validate") {
       return {
-        valid: result.success,
-        fieldCount: result.fieldCount,
-        errors: result.errors,
-        warnings: result.warnings,
+        valid: activeResult.success,
+        fieldCount: activeResult.fieldCount,
+        errors: activeResult.errors,
+        warnings: activeResult.warnings,
       };
     }
 
-    if (selectedMapping && result.mappings) {
-      return result.mappings[selectedMapping];
+    if (activeSelectedMapping && activeResult.mappings) {
+      return activeResult.mappings[activeSelectedMapping];
     }
 
     return null;
@@ -279,16 +407,20 @@ export default function UnderwritingMapper() {
             <button
               key={a}
               onClick={() => {
+                if (isProcessing) return; // Block during processing
                 setAction(a);
-                setResult(null);
                 setError(null);
                 setSelectedSheet("");
-                // Keep availableSheets and currentFile for convenience
+                setViewingHistoryId(null);
+                // Results, mappings, and sheets are now stored per-action, so no need to clear them
               }}
+              disabled={isProcessing}
               className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
                 action === a
                   ? "border-blue-600 text-blue-600 dark:text-blue-400"
-                  : "border-transparent text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white"
+                  : isProcessing
+                    ? "border-transparent text-zinc-400 dark:text-zinc-600 cursor-not-allowed"
+                    : "border-transparent text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white"
               }`}
             >
               {a === "list-fields"
@@ -309,6 +441,15 @@ export default function UnderwritingMapper() {
           Clear
         </button>
 
+        {isProcessing && (
+          <button
+            onClick={handleCancel}
+            className="px-3 py-1.5 text-sm bg-red-600 text-white hover:bg-red-700 rounded-md transition-colors"
+          >
+            Cancel
+          </button>
+        )}
+
         {action === "generate" && (
           <label className="flex items-center gap-2 px-3 py-1.5 text-sm cursor-pointer">
             <input
@@ -322,6 +463,20 @@ export default function UnderwritingMapper() {
         )}
 
         {action === "generate" && useAI && (
+          <select
+            value={aiModel}
+            onChange={(e) => setAiModel(e.target.value)}
+            className="px-3 py-1.5 text-sm bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            {availableModels.map((model) => (
+              <option key={model.value} value={model.value}>
+                {model.label}
+              </option>
+            ))}
+          </select>
+        )}
+
+        {action === "generate" && useAI && (
           <input
             type="text"
             value={aiNotes}
@@ -331,10 +486,10 @@ export default function UnderwritingMapper() {
           />
         )}
 
-        {action === "generate" && result?.mappings && (
+        {action === "generate" && activeResult?.mappings && (
           <button
             onClick={handleDownloadAll}
-            disabled={Object.keys(result.mappings).length === 0}
+            disabled={Object.keys(activeResult.mappings).length === 0}
             className="px-3 py-1.5 text-sm bg-blue-600 text-white hover:bg-blue-700 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Download All
@@ -351,16 +506,17 @@ export default function UnderwritingMapper() {
           </button>
         )}
 
-        {result && (
+        {activeResult && (
           <span className="text-sm text-zinc-500 dark:text-zinc-400 ml-auto">
-            {result.action === "generate" &&
-              `${result.sheetCount} sheets analyzed, ${result.sheets?.length || 0} mappings generated`}
-            {result.action === "analyze" &&
-              `${result.sheetCount} sheets found`}
-            {result.action === "list-fields" &&
-              `${result.inputCells?.length || 0} input fields, ${result.monthlyPatterns?.length || 0} monthly patterns`}
-            {result.action === "validate" &&
-              (result.success ? "Valid mapping" : "Invalid mapping")}
+            {viewingHistoryId && <span className="text-amber-600 dark:text-amber-400 mr-2">[History]</span>}
+            {activeResult.action === "generate" &&
+              `${activeResult.sheetCount} sheets analyzed, ${activeResult.sheets?.length || 0} mappings generated`}
+            {activeResult.action === "analyze" &&
+              `${activeResult.sheetCount} sheets found`}
+            {activeResult.action === "list-fields" &&
+              `${activeResult.inputCells?.length || 0} input fields, ${activeResult.monthlyPatterns?.length || 0} monthly patterns`}
+            {activeResult.action === "validate" &&
+              (activeResult.success ? "Valid mapping" : "Invalid mapping")}
           </span>
         )}
       </div>
@@ -385,10 +541,78 @@ export default function UnderwritingMapper() {
             <>
               <div className="shrink-0">
                 <FileUpload
+                  key={uploadKey}
                   onFileSelect={handleFileUpload}
                   isProcessing={isProcessing}
+                  useAI={action === "generate" && useAI}
+                  hasResult={!!result}
+                  currentFile={currentFile}
                 />
               </div>
+
+              {/* History Section - filtered by current action */}
+              {filteredHistory.length > 0 && (
+                <div className="shrink-0 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg overflow-hidden">
+                  <div className="flex items-center justify-between p-3 border-b border-zinc-200 dark:border-zinc-700">
+                    <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
+                      Previous Extractions ({filteredHistory.length})
+                    </h3>
+                    <button
+                      onClick={() => setHistory(prev => prev.filter(h => h.action !== action))}
+                      className="text-xs text-zinc-500 hover:text-red-500"
+                    >
+                      Clear All
+                    </button>
+                  </div>
+                  <div className="max-h-40 overflow-y-auto">
+                    {filteredHistory.map((item) => (
+                      <div
+                        key={item.id}
+                        onClick={() => handleSelectHistoryItem(item.id)}
+                        className={`flex items-center justify-between p-3 cursor-pointer ${
+                          viewingHistoryId === item.id
+                            ? "bg-amber-100 dark:bg-amber-900/30 border-l-2 border-amber-500"
+                            : "hover:bg-zinc-100 dark:hover:bg-zinc-700"
+                        }`}
+                      >
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium truncate text-zinc-900 dark:text-white">
+                            {item.fileName}
+                          </p>
+                          <p className="text-xs text-zinc-500">
+                            {new Date(item.timestamp).toLocaleTimeString()}
+                          </p>
+                        </div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteHistoryItem(item.id);
+                          }}
+                          className="ml-2 p-1 text-zinc-400 hover:text-red-500"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Back to Current Button */}
+              {viewingHistoryId && (result || isProcessing || currentFile) && (
+                <button
+                  onClick={handleBackToCurrent}
+                  className="shrink-0 w-full p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-700 rounded-lg"
+                >
+                  <span className="text-sm font-medium text-blue-700 dark:text-blue-300">
+                    ← {isProcessing
+                      ? `Processing: ${currentFile?.name}...`
+                      : result
+                        ? "Back to Current Result"
+                        : `Back to: ${currentFile?.name}`}
+                  </span>
+                </button>
+              )}
 
               {error && (
                 <div className="shrink-0 p-4 bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-800 rounded-lg">
@@ -427,13 +651,13 @@ export default function UnderwritingMapper() {
               )}
 
               {/* Sheet list for analyze action */}
-              {action === "analyze" && result?.sheets && (
+              {activeResult?.action === "analyze" && activeResult?.sheets && (
                 <div className="flex-1 min-h-0 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg p-4 overflow-y-auto">
                   <h3 className="text-sm font-semibold text-zinc-900 dark:text-white mb-3">
-                    Sheets Analysis
+                    {viewingHistoryId ? "Historical Sheets Analysis" : "Sheets Analysis"}
                   </h3>
                   <div className="space-y-2">
-                    {result.sheets.map((sheet) => (
+                    {activeResult.sheets.map((sheet) => (
                       <div
                         key={sheet.name}
                         className="p-3 bg-white dark:bg-zinc-700 rounded-md border border-zinc-200 dark:border-zinc-600"
@@ -454,12 +678,14 @@ export default function UnderwritingMapper() {
                             Size: {sheet.rows}x{sheet.columns}
                           </span>
                         </div>
-                        <button
-                          onClick={() => handleListFields(sheet.name)}
-                          className="mt-2 text-xs text-blue-600 dark:text-blue-400 hover:underline"
-                        >
-                          View Fields →
-                        </button>
+                        {!viewingHistoryId && (
+                          <button
+                            onClick={() => handleListFields(sheet.name)}
+                            className="mt-2 text-xs text-blue-600 dark:text-blue-400 hover:underline"
+                          >
+                            View Fields →
+                          </button>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -467,27 +693,33 @@ export default function UnderwritingMapper() {
               )}
 
               {/* Mapping list for generate action */}
-              {action === "generate" &&
-                result?.mappings &&
-                Object.keys(result.mappings).length > 0 && (
+              {activeResult?.action === "generate" &&
+                activeResult?.mappings &&
+                Object.keys(activeResult.mappings).length > 0 && (
                   <div className="flex-1 min-h-0 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg p-4 overflow-y-auto">
                     <h3 className="text-sm font-semibold text-zinc-900 dark:text-white mb-3">
-                      Generated Mappings
+                      {viewingHistoryId ? "Historical Mappings" : "Generated Mappings"}
                     </h3>
                     <div className="space-y-2">
-                      {Object.keys(result.mappings).map((key) => {
-                        const sheet = result.sheets?.find(
+                      {Object.keys(activeResult.mappings).map((key) => {
+                        const sheet = activeResult.sheets?.find(
                           (s) => {
                             const sanitizedName = s.name.replace(/[^a-zA-Z0-9]/g, "_").toLowerCase();
-                            return `${result.modelName}_${sanitizedName}_${s.type}` === key;
+                            return `${activeResult.modelName}_${sanitizedName}_${s.type}` === key;
                           }
                         );
                         return (
                           <div
                             key={key}
-                            onClick={() => setSelectedMapping(key)}
+                            onClick={() => {
+                              if (viewingHistoryId) {
+                                handleHistoryMappingSelect(viewingHistoryId, key);
+                              } else {
+                                setSelectedMapping(key);
+                              }
+                            }}
                             className={`w-full text-left p-3 rounded-md transition-colors cursor-pointer ${
-                              selectedMapping === key
+                              activeSelectedMapping === key
                                 ? "bg-blue-100 dark:bg-blue-900/30 border border-blue-300 dark:border-blue-700"
                                 : "bg-white dark:bg-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-600 border border-zinc-200 dark:border-zinc-600"
                             }`}
@@ -499,7 +731,7 @@ export default function UnderwritingMapper() {
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  handleDownload(key, result.mappings![key]);
+                                  handleDownload(key, activeResult.mappings![key]);
                                 }}
                                 className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
                               >
@@ -526,17 +758,17 @@ export default function UnderwritingMapper() {
           <MappingOutput
             mapping={getOutputContent()}
             fileName={
-              result?.action === "generate"
-                ? selectedMapping || undefined
-                : result?.action || undefined
+              activeResult?.action === "generate"
+                ? activeSelectedMapping || undefined
+                : activeResult?.action || undefined
             }
-            isValidation={result?.action === "validate"}
+            isValidation={activeResult?.action === "validate"}
             validationResult={
-              result?.action === "validate"
+              activeResult?.action === "validate"
                 ? {
-                    success: result.success,
-                    errors: result.errors || [],
-                    warnings: result.warnings || [],
+                    success: activeResult.success,
+                    errors: activeResult.errors || [],
+                    warnings: activeResult.warnings || [],
                   }
                 : undefined
             }

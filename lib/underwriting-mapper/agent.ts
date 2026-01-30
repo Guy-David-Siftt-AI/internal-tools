@@ -99,7 +99,10 @@ export async function classifyFieldsWithAI(
   sheetName: string,
   sheetType: string,
   aiNotes: string = "",
+  aiModel: string = "gemini-2.0-flash",
 ): Promise<Map<string, FieldClassification>> {
+  console.log(`[ADK] classifyFieldsWithAI called for sheet "${sheetName}" with ${inputCells.length} cells, model: ${aiModel}`);
+
   const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || process.env.GOOGLE_GENAI_API_KEY;
 
   if (!apiKey) {
@@ -122,7 +125,7 @@ export async function classifyFieldsWithAI(
   }));
 
   try {
-    const agent = createMapperAgent();
+    const agent = createMapperAgent(aiModel);
     const sessionService = new InMemorySessionService();
     const runner = new Runner({
       agent,
@@ -177,22 +180,42 @@ Return ONLY a JSON array of classifications, no other text.`;
     // Parse the response to extract classifications
     const classifications = new Map<string, FieldClassification>();
 
+    console.log("[ADK] Response text length:", responseText.length);
+
     if (responseText) {
       try {
         // Try to extract JSON from the response
         const jsonMatch = responseText.match(/\[[\s\S]*\]/);
         if (jsonMatch) {
           const parsed = JSON.parse(jsonMatch[0]) as FieldClassification[];
-          for (const classification of parsed) {
-            if (classification.original_label || classification.field_name) {
-              const key = classification.original_label || classification.field_name;
-              classifications.set(key, classification);
+          console.log("[ADK] Parsed classifications:", parsed.length);
+
+          for (let i = 0; i < parsed.length && i < fields.length; i++) {
+            const classification = parsed[i];
+            const originalField = fields[i];
+
+            // Store by original label, cell reference, and field name for flexible matching
+            if (originalField.label) {
+              classifications.set(originalField.label, classification);
+            }
+            if (originalField.cell) {
+              classifications.set(originalField.cell, classification);
+            }
+            if (classification.field_name) {
+              classifications.set(classification.field_name, classification);
             }
           }
+
+          console.log("[ADK] Classifications stored:", classifications.size);
+        } else {
+          console.warn("[ADK] No JSON array found in response");
         }
       } catch (parseError) {
-        console.warn("Failed to parse AI classification response:", parseError);
+        console.warn("[ADK] Failed to parse AI classification response:", parseError);
+        console.warn("[ADK] Response was:", responseText.substring(0, 500));
       }
+    } else {
+      console.warn("[ADK] Empty response from LLM");
     }
 
     return classifications;
@@ -209,6 +232,7 @@ export async function generateMappingWithAI(
   analysis: SheetAnalysis,
   sheetType: string,
   aiNotes: string = "",
+  aiModel: string = "gemini-2.0-flash",
 ): Promise<SheetMapping> {
   const mapping: SheetMapping = {
     sheet_name: analysis.sheetName,
@@ -232,6 +256,7 @@ export async function generateMappingWithAI(
     analysis.sheetName,
     sheetType,
     aiNotes,
+    aiModel,
   );
 
   // Add monthly patterns first
@@ -255,8 +280,11 @@ export async function generateMappingWithAI(
   for (const cell of analysis.inputCells) {
     if (monthlyCells.has(cell.cell)) continue;
 
-    const baseLabel = cell.label || `Field_${cell.cell}`;
-    const aiClass = aiClassifications.get(baseLabel) || aiClassifications.get(cell.label || "");
+    // Try to find AI classification by label or cell reference
+    const aiClass =
+      aiClassifications.get(cell.label || "") ||
+      aiClassifications.get(cell.cell) ||
+      undefined;
 
     const fieldName = aiClass?.field_name || cleanFieldName(cell.label) || `Field_${cell.cell}`;
 
