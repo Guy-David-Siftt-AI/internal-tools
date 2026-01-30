@@ -1,7 +1,6 @@
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 
-// TEMP: Auth disabled for testing - set to false to re-enable
-const AUTH_DISABLED = true;
+const AUTH_DISABLED = false;
 
 // Define public routes that don't require authentication
 const isPublicRoute = createRouteMatcher([
